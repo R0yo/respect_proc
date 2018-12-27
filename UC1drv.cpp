@@ -1,11 +1,11 @@
 /*---------------------------------------------------------------------------
- *  UC2drv.c
+ *  UC1drv.c
  *---------------------------------------------------------------------------
  *
  *  SpectraSource Data Acquisition Subsystem
  *
  *  SpectraSource Data Acquisition Interface Driver for
- *  UC2 scanning spectrograph (Tihonov Anatoliy +7(903)7759555).
+ *  UC1 scanning spectrograph (Tihonov Anatoliy +7(903)7759555).
  *
  *  Implementation of device specific functions
  *
@@ -29,9 +29,9 @@
  *  Author:
  *    Sergey V. Kurbasov
  *
- *  Initial revision: 28 Jun 2010
+ *  Initial revision: 22 May 2006
  *
- *  $Id: UC2drv.cpp,v 1.2 2015/06/23 13:59:03 kurbasov Exp $
+ *  $Id: UC1drv.cpp,v 1.4 2013/12/11 07:50:10 kurbasov Exp $
  */
 
 /*-------------------------------------------------------------------------*/
@@ -45,27 +45,21 @@
 /* Driver declarations */
 #include <Driver.h>
 
-/* VCL classes for config, setup, and calcel dialogs */
+/* VCL classes for config and setup dialogs */
 #include <vcl/Classes.hpp>
 #include <vcl/Dialogs.hpp>
 
-/* VCL UI dialogs */
-#include "UC2config.h"
-#include "UC2setup.h"
-#include "UC2Cancel.h"
-
-#define PUTINRANGE(v, minv, maxv) \
-  if((v) < (minv)) \
-    (v) = (minv); \
-  else if((v) > (maxv)) \
-    (v) = (maxv);
+/* Our modules */
+#include "UC1config.h"
+#include "UC1setup.h"
+#include "UC1Cancel.h"
 
 /* Version symbols */
-#define UC2_DEVVER_2_00 0
+#define UC1_DEVVER_1_00 0
+#define UC1_DEVVER_1_01 1
 
 /* Buffer sizes */
-#define DBUF_SIZE ((4096 + 100)*4)
-#define MAX_DATA_SIZE 16384
+#define DBUF_SIZE ((4096*4) + 100)
 #define COMMAND_BUFFER_SIZE 256
 #define REPLY_BUFFER_SIZE 1024
 #define TRANSCRIPT_SIZE 20
@@ -74,19 +68,18 @@
  *  Global device configuration data.
  ****************************************************************************/
 /* The name for our device representation */
-static const char DevName[] = "UC2";
+static const char DevName[] = "UC1";
 
 /* Config profile section to store config data */
-static const char ConfigSection[] = "UC2 Hardware Configuration";
+static const char ConfigSection[] = "UC1 Hardware Configuration";
 
 /* Configuration */
-static int reconfiguration_requested = 0;
 static int config_loaded = 0;    /* We should read cfg only once per session */
 
 /*
  *  These arrays used to pass channel information with SPSRDevInfo struct.
  *
- *  We support only one controller with only one channel!
+ *  XXX. We support only one controller with only one channel!
  */
 static int channel_elements[1] = {0};
 static int channel_bits[1] = {0};
@@ -102,7 +95,8 @@ static DWORD acq_start_time;  // For detection of timeouts.
  */
 char *version_idstr[] =
 {
-  "2.00"
+  "1.00",
+  "1.01"
 };
 static int num_versions = sizeof(version_idstr)/sizeof(version_idstr[0]);
 
@@ -118,42 +112,33 @@ int device_version = -1;
 
 #define CONNECTED (h_comm != INVALID_HANDLE_VALUE)
 
-/* These data constitues the device configuration vars (CFG) */
+/* These data constitues the device configuration vars */
 short port_num = 0;     // COM port used to connect to device
-int step_divisor = 0;
+
 int range_min = 0;      // Min available position (0)
 int range_max = 0;      // Max available position
-int limsw1_ref   = 450; // Reference level for limit switch 1
-int limsw2_ref   = 450; // Reference level for limit switch 2
-int motor_ref    = 28;
+
+int min_pos = 0;        // User defined min
+int max_pos = 0;        // User defined max
+
+int limsw1_ref   = 0;   // Reference level for limit switch 1
+int limsw2_ref   = 0;   // Reference level for limit switch 2
 
 #define CHANNEL_ELEMENTS (range_max - range_min + 1)  //(max_pos - min_pos)
 
-/* These are the device settings vars  (.INI) */
+/* These are the device settings vars */
+int stepping_rate = 1000;
 int reversed_data_array = 0;
 int bidir_scanning = 1;
-int min_pos = 0;        // User defined min
-int max_pos = 0;        // User defined max
-double stepping_rate = 1000.0;
-double min_stepping_rate = 0.7;
-double max_stepping_rate = 1000.0;
+
+/* This is the device state information cache */
+int current_pos = 0;
 int limsw1_level = 0;
 int limsw2_level = 0;
-int acceleration = 0;
-int high_gain = 0;
-int high_prr  = 0;
-int low_prr_mode = 0; /* No bkg sub */
-int high_prr_mode = 1; /* No ave */
-int max_high_prr_mode = 100;
-int ext_sync_mode = 0; /* No ext sync */
-double adc_sync_delay = 27.0; /* us */
-
-/* This are the device state information */
-int current_pos = 0;
 int running = 0;
 
 /* Buffers */
-static unsigned short data_buffer[DBUF_SIZE];
+static long data_buffer[DBUF_SIZE];
 static char command_buffer[COMMAND_BUFFER_SIZE];
 static char reply_buffer[REPLY_BUFFER_SIZE];
 
@@ -377,7 +362,7 @@ set_error_and_state(SPSRDevStatus err, int line, char* msg)
   if(dev_status != err && err == spsrdevTimeout)
     {
       dev_status = err;
-      // report_com_errors_and_stat();
+      //XXX report_com_errors_and_stat();
     }
 
   dev_status = err;
@@ -431,7 +416,7 @@ open_comm_port(short portNumber)
    */
   if(hComm != INVALID_HANDLE_VALUE)
     {
-      if(!SetupComm(hComm, 64000, 16000))
+      if(!SetupComm(hComm, 16000, 16000))
         {
           CloseHandle(hComm);
           return INVALID_HANDLE_VALUE;
@@ -443,18 +428,15 @@ open_comm_port(short portNumber)
           return INVALID_HANDLE_VALUE;
         }
 
-      dcb.BaudRate      = 460800;
-                          //921600;
+      dcb.BaudRate      = 115200;
       dcb.ByteSize      = 8;
       dcb.StopBits      = ONESTOPBIT;
 
       dcb.Parity        = NOPARITY;
       dcb.fParity       = FALSE;
 
-      dcb.fOutxCtsFlow  = FALSE;
-                          //TRUE;
-      dcb.fRtsControl   = //RTS_CONTROL_ENABLE;
-                          RTS_CONTROL_DISABLE;
+      dcb.fOutxCtsFlow  = FALSE; //TRUE;
+      dcb.fRtsControl   = RTS_CONTROL_DISABLE;
 
       dcb.fOutxDsrFlow  = FALSE; //TRUE;
       dcb.fDtrControl   = DTR_CONTROL_DISABLE;
@@ -686,7 +668,7 @@ send_device_cmd(char* buf, int line, char* caller)
 
 
 /*
- *  Receive one ASCII line from device.
+ *  Receive one line from device.
  */
 int
 receive_device_reply_line(char* buf, int line, char* caller)
@@ -746,53 +728,6 @@ receive_device_reply_line(char* buf, int line, char* caller)
 
 } /* receive_device_reply_line(char* buf, int line, char* caller) */
 
-/*
- *  Performs bidirectional data exchange with the device.
- *  Input: command_buffer (caller formated)
- *  Output: reply_buffer
- */
-int
-device_exchange(int line, char* caller)
-{
-  int res = 0;
-
-  if(dev_status == spsrdevOk)
-    {
-      purge_device();
-      res = send_device_cmd(command_buffer, line, caller);
-      res = res && receive_device_reply_line(reply_buffer, line, caller);
-      res = res && receive_device_reply_line(reply_buffer, line, caller);
-    }
-    
-  return res;
-
-} /* device_exchange(int line, char* caller) */
-
-/*
- *  Receive binary data block from the device. Returns number of bytes
- *  read.
- */
-int
-receive_device_bin(char* buf, int count, int line, char* caller)
-{
-  if(h_comm != INVALID_HANDLE_VALUE)
-    {
-      int res = comm_receive(h_comm, buf, count);
-
-      if(res != count)
-        {
-          set_error_and_state(spsrdevTimeout, line,
-            get_last_error_msg("receive_device_bin: WinError -> "));
-          put_in_transcript(line, caller, 1);
-        }
-
-      return res;
-    }
-
-  return 0;
-
-} /* receive_device_bin(char* buf, int count, int line, char* caller) */
-
 
 /****************************************************************************
  *  Device commands.
@@ -825,7 +760,7 @@ check_device_ID(void)
   /* Parse result */
   if(res)
     {
-      if(sscanf(reply_buffer, ">ID=UC2 FW %9s", str) != 1)
+      if(sscanf(reply_buffer, ">ID=UC1 FW %9s", str) != 1)
         {
           set_error_and_state(spsrdevBadResponse, __LINE__, "check_device_ID:");
           device_version = -1;
@@ -849,10 +784,6 @@ known_device:
   return 0;
 
 } /* check_device_ID(void) */
-
-/*---------------------------------------------------------------------------
- *  Device parameters handling helpers
- */
 
 /*
  *  Retreive motor position from the device and store to internal
@@ -893,6 +824,8 @@ get_current_position_nocache(void)
 
 } /* get_current_position_nocache(void) */
 
+
+
 /*
  *  Retreive motor motion range from the device and store to internal
  *  cache var.
@@ -927,7 +860,7 @@ get_motion_range_nocache(void)
 
       if(ra > 0)
         range_max = ra/16*16-1;
-
+        
       return range_max;
     }
 
@@ -935,64 +868,16 @@ get_motion_range_nocache(void)
 
 } /* get_motion_range_nocache(void) */
 
-/*
- *  Retreive motor stepping rate min/max from the device and store
- *  to internal cache vars.
- *  NOTE: The values depends on the other device settings
- */
-int
-get_stepping_rate_and_minmax_nocache(void)
-{
-  int res;
-  double sp;
-  double minsp;
-  double maxsp;
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  /* Set show limits mode */
-  strcpy(command_buffer, "limits show");
-  device_exchange(__LINE__, "get_stepping_rate_and_minmax_nocache:");
-
-  /* Get stepping_rate limits */
-  strcpy(command_buffer, "speed");
-  res = device_exchange(__LINE__, "get_stepping_rate_and_minmax_nocache:");
-
-  /* Parse result */
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">SPEED %lg ( %lg - %lg )", &sp, &minsp, &maxsp) != 3)
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "get_stepping_rate_and_minmax_nocache:");
-          return 0;
-        }
-
-      min_stepping_rate = minsp;
-      max_stepping_rate = maxsp;
-      stepping_rate     = sp;
-
-      /* Set hide limits mode */
-      strcpy(command_buffer, "limits show");
-      device_exchange(__LINE__, "get_stepping_rate_and_minmax_nocache:");
-
-      return 1; // Ok
-    }
-
-  return 0;
-
-} /* get_stepping_rate_and_minmax_nocache(void) */
 
 /*
  *  Retreive motor stepping rate from the device and store to internal
  *  cache var.
  */
-double
+int
 get_stepping_rate_nocache(void)
 {
   int res; // for debug
-  double sp;
+  int sp;
 
   if(dev_status != spsrdevOk)
     return 0; // Port not initialized or error state.
@@ -1009,7 +894,7 @@ get_stepping_rate_nocache(void)
   /* Parse result */
   if(res && dev_status == spsrdevOk)
     {
-      if(sscanf(reply_buffer, ">SPEED %lg", &sp) != 1)
+      if(sscanf(reply_buffer, ">SPEED %d", &sp) != 1)
         {
           set_error_and_state(spsrdevBadResponse, __LINE__,
             "get_stepping_rate_nocache:");
@@ -1027,17 +912,16 @@ get_stepping_rate_nocache(void)
 /*
  *  Set motor stepping rate. Return actually set value.
  */
-double
-set_stepping_rate(double Hz)
+int
+set_stepping_rate(int Hz)
 {
   int res; // for debug
 
   if(dev_status != spsrdevOk)
     return 0; // Port not initialized or error state.
 
-  purge_device();  
-  //sprintf(command_buffer, "speed %lg", Hz);
-  sprintf(command_buffer, "speed %.1lf", Hz);
+  purge_device();
+  sprintf(command_buffer, "speed %d", Hz);
 
   res = send_device_cmd(command_buffer, __LINE__, "set_stepping_rate:");
   res = res && receive_device_reply_line(reply_buffer, __LINE__,
@@ -1048,7 +932,7 @@ set_stepping_rate(double Hz)
   /* Parse result */
   if(res && dev_status == spsrdevOk)
     {
-      if(sscanf(reply_buffer, ">SPEED %lg", &Hz) != 1)
+      if(sscanf(reply_buffer, ">SPEED %d", &Hz) != 1)
         {
           set_error_and_state(spsrdevBadResponse, __LINE__,
             "set_stepping_rate:");
@@ -1060,7 +944,7 @@ set_stepping_rate(double Hz)
 
   return 0;
 
-} /* set_stepping_rate(double Hz) */
+} /* set_stepping_rate(int Hz) */
 
 
 /*
@@ -1163,442 +1047,6 @@ set_limsw_ref(int sw, int ref)
 
 } /* set_limsw_ref(int sw, int ref) */
 
-// NEW **********************************************************************
-/*
- *  Retreive motor ref current from the device and store to internal
- *  cache vars.
- */
-int
-get_motor_ref_nocache(void)
-{
-  int res; // for debug
-  int ref;
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  purge_device();
-  sprintf(command_buffer, "mr");
-
-  res = send_device_cmd(command_buffer, __LINE__, "get_motor_ref_nocache:");
-  res = res && receive_device_reply_line(reply_buffer, __LINE__,
-    "get_motor_ref_nocache:");
-  res = res && receive_device_reply_line(reply_buffer, __LINE__,
-    "get_motor_ref_nocache:");
-
-  /* Parse result */
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">MREF %d", &ref) != 1)
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "get_motor_ref_nocache:");
-          return 0;
-        }
-
-      motor_ref = ref;
-
-      return 1;
-    }
-
-  return 0;
-
-} /* get_motor_ref_nocache(void) */
-
-
-/*
- *  Set motor current ref. Return actually set value.
- */
-int
-set_motor_ref(int ref)
-{
-  int res; // for debug
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  purge_device();
-  sprintf(command_buffer, "mr %d", ref);
-
-  res = send_device_cmd(command_buffer, __LINE__, "set_motor_ref:");
-  res = res && receive_device_reply_line(reply_buffer, __LINE__,
-    "set_motor_ref:");
-  res = res && receive_device_reply_line(reply_buffer, __LINE__,
-    "set_motor_ref:");
-
-  /* Parse result */
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">MREF %d", &ref) != 1)
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "set_motor_ref:");
-          return 0;
-        }
-
-      motor_ref = ref;
-
-      return 1;
-    }
-
-  return 0;
-
-} /* set_motor_ref(int ref) */
-
-
-
-/*
- *  Get stepping motor step divisor and store to cache var.
- */
-int
-get_motor_step_divisor_nocache(void)
-{
-  int res; // for debug
-  int sdiv;
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  strcpy(command_buffer, "mstep");
-  res = device_exchange(__LINE__, "get_motor_step_divisor_nocache:");
-
-  /* Parse result */
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">MSTEP %d", &sdiv) != 1)
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "get_motor_step_divisor_nocache:");
-          return 0;
-        }
-
-      return step_divisor = sdiv>>1; // XXX. This will give correct result
-                                         // ONLY for 1,2,4 -> 0,1,2
-    }
-
-  return 0;
-
-} /* get_motor_step_divisor_nocache(void) */
-
-/*
- *  Set stepping motor step divisor.
- */
-int
-set_motor_step_divisor(int sdiv)
-{
-  int res; // for debug
-  //int tmp;
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  sprintf(command_buffer, "mstep %d", 1<<sdiv);
-  res = device_exchange(__LINE__, "set_motor_step_divisor_nocache:");
-
-  /* Parse result */
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">MSTEP %d", &sdiv) != 1)
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "set_motor_step_divisor_nocache:");
-          return 0;
-        }
-
-      return step_divisor = sdiv>>1;  // XXX. This will give correct result
-                                         // ONLY for 1,2,4 -> 0,1,2
-    }
-
-  return 0;
-
-} /* set_motor_step_divisor(int sdiv) */
-
-/*
- *  Get stepping motor acceleration flag and store to cache var.
- */
-int
-get_motor_acceleration_nocache(void)
-{
-  int res; // for debug
-  char tmp[64];
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  strcpy(command_buffer, "turbo");
-  res = device_exchange(__LINE__, "get_motor_acceleration_nocache:");
-
-  /* Parse result */
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">TURBO %5s", tmp) != 1 ||
-         (strcmp(tmp, "ON") && strcmp(tmp, "OFF")) )
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "get_motor_acceleration_nocache:");
-          return 0;
-        }
-
-      return acceleration = strcmp(tmp, "OFF");
-    }
-
-  return 0;
-
-} /* get_motor_acceleration_nocache(void) */
-
-/*
- *  Set stepping motor acceleration flag.
- */
-int
-set_motor_acceleration(int accel)
-{
-  int res; // for debug
-  char tmp[64];
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  sprintf(command_buffer, "turbo %s", accel ? "ON" : "OFF");
-  res = device_exchange(__LINE__, "set_motor_step_divisor_nocache:");
-
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">TURBO %5s", tmp) != 1 ||
-         (strcmp(tmp, "ON") && strcmp(tmp, "OFF")) )
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "get_motor_acceleration_nocache:");
-          return 0;
-        }
-
-      return acceleration = strcmp(tmp, "ON") == 0;
-    }
-
-  return 0;
-
-} /* set_motor_acceleration(int accel) */
-
-/**** Photo registration unit (phru) params ****/
-
-/*
- *  Set photo registration unit gain (high != 0, low == 0).
- */
-int
-set_photo_gain(int gain)
-{
-  int res; // for debug
-  char tmp[64];
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  sprintf(command_buffer, "gain %s", gain ? "high" : "low");
-  res = device_exchange(__LINE__, "set_photo_gain:");
-
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">GAIN %5s", tmp) != 1 ||
-         (strcmp(tmp, "HIGH") && strcmp(tmp, "LOW")) )
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "set_photo_gain:");
-          return 0;
-        }
-
-      return high_gain = strcmp(tmp, "HIGH") == 0;
-    }
-
-  return 0;
-
-} /* set_photo_gain(int gain) */
-
-/*
- *  Set photo registration unit pulse repetition rate (high != 0, low == 0).
- */
-int
-set_photo_pulse_rate(int rate)
-{
-  int res; // for debug
-  char tmp[64];
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  sprintf(command_buffer, "rate %s", rate ? "high" : "low");
-  res = device_exchange(__LINE__, "set_photo_pulse_rate:");
-
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">RATE %5s", tmp) != 1 ||
-         (strcmp(tmp, "HIGH") && strcmp(tmp, "LOW")) )
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "set_photo_pulse_rate:");
-          return 0;
-        }
-
-      return high_prr = strcmp(tmp, "HIGH") == 0;
-    }
-
-  return 0;
-
-} /* set_photo_pulse_rate(int rate) */
-
-/*
- *  Set photo registration unit low_prr_mode (bkg subtraction mode).
- */
-int
-set_photo_low_prr_mode(int mode)
-{
-  int res; // for debug
-  int tmp;
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  sprintf(command_buffer, "lrr %d", mode);
-  res = device_exchange(__LINE__, "set_photo_low_prr_mode:");
-
-  /* Parse result */
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">LRR %d", &tmp) != 1)
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "set_photo_low_prr_mode:");
-          return 0;
-        }
-
-      return low_prr_mode = tmp;
-    }
-
-  return 0;
-
-} /* set_photo_low_prr_mode(int mode) */
-
-/*
- *  Set photo registration unit high_prr_mode (averaging mode).
- */
-int
-set_photo_high_prr_mode(int mode)
-{
-  int res; // for debug
-  int tmp;
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  sprintf(command_buffer, "hrr %d", mode);
-  res = device_exchange(__LINE__, "set_photo_high_prr_mode:");
-
-  /* Parse result */
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">HRR %d", &tmp) != 1)
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "set_photo_high_prr_mode:");
-          return 0;
-        }
-
-      return high_prr_mode = tmp;
-    }
-
-  return 0;
-
-} /* set_photo_high_prr_mode(int mode) */
-
-/*
- *  Get max_high_prr_mode. Depends on current stepping_rate setting.
- */
-int
-get_max_high_prr_mode(void)
-{
-  int cur_hprr = high_prr_mode;
-
-  set_photo_high_prr_mode(1000);
-
-  max_high_prr_mode = high_prr_mode;
-
-  set_photo_high_prr_mode(cur_hprr);
-
-  return max_high_prr_mode;
-
-} /* get_max_high_prr_mode(void) */
-
-/*
- *  Set photo registration unit ext_sync_mode.
- */
-int
-set_photo_ext_sync_mode(int mode)
-{
-  int res; // for debug
-  int tmp;
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  sprintf(command_buffer, "sync %d", mode);
-  res = device_exchange(__LINE__, "set_photo_ext_sync_mode:");
-
-  /* Parse result */
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">SYNC %d", &tmp) != 1)
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "set_photo_ext_sync_mode:");
-          return 0;
-        }
-
-      //return ext_sync_mode = tmp;
-
-      // Fast motion w/o DAQ
-      return tmp;
-    }
-
-  return 0;
-
-} /* set_photo_ext_sync_mode(int mode) */
-
-/*
- *  Set photo registration unit adc_sync_delay.
- */
-int
-set_photo_adc_sync_delay(double delay)
-{
-  int res; // for debug
-  double tmp;
-
-  if(dev_status != spsrdevOk)
-    return 0; // Port not initialized or error state.
-
-  sprintf(command_buffer, "delay %lf", delay);
-  res = device_exchange(__LINE__, "set_photo_adc_sync_delay:");
-
-  /* Parse result */
-  if(res && dev_status == spsrdevOk)
-    {
-      if(sscanf(reply_buffer, ">DELAY %lg", &tmp) != 1)
-        {
-          set_error_and_state(spsrdevBadResponse, __LINE__,
-            "set_photo_adc_sync_delay:");
-          return 0;
-        }
-
-      return adc_sync_delay = tmp;
-    }
-
-  return 0;
-
-} /* set_photo_adc_sync_delay(double delay) */
-
-
-
-
-/*---------------------------------------------------------------------------
- *  Device operation helpers.
- */
 
 /*
  *  Clear device onboard data memory in specified range.
@@ -1643,19 +1091,29 @@ clear_onboard_memory(int from, int to)
 
 
 /*
- *  Read device onboard data memory to local buffer using binary transmittion.
+ *  Read device onboard data memory to local buffer.
  */
 int
-read_onboard_memory_bin(int from, int to)
+read_onboard_memory(int from, int to)
 {
   int res; // for debug
   int count;
+  char* str;
+  char* eptr;
+  long lnum;
+  long* buf = reversed_data_array ? data_buffer + to : data_buffer + from;
 
   if(dev_status != spsrdevOk)
     return 0; // Port not initialized or device in error state.
 
-  sprintf(command_buffer, "b %d %d", from, to);
-  res = device_exchange(__LINE__, "read_onboard_memory_bin:");
+  purge_device();
+  sprintf(command_buffer, "view %d %d", from, to);
+
+  res = send_device_cmd(command_buffer, __LINE__, "read_onboard_memory:");
+  res = res && receive_device_reply_line(reply_buffer, __LINE__,
+    "read_onboard_memory:");
+  res = res && receive_device_reply_line(reply_buffer, __LINE__,
+    "read_onboard_memory:");
 
   /* Parse initial reply */
   if(res && dev_status == spsrdevOk)
@@ -1663,31 +1121,62 @@ read_onboard_memory_bin(int from, int to)
       if(strcmp(reply_buffer, ">INVALID ARGUMENTS") == 0)
         {
           set_error_and_state(spsrdevBadParams, __LINE__,
-            "read_onboard_memory_bin:");
+            "read_onboard_memory:");
           return 0;
         }
       else
         {
-          sprintf(command_buffer, ">B %d %d", from, to);
+          sprintf(command_buffer, ">VIEW FROM %d TO %d", from, to);
           if(strcmp(reply_buffer, command_buffer))
             {
               set_error_and_state(spsrdevBadResponse, __LINE__,
-                "read_onboard_memory_bin:");
+                "read_onboard_memory:");
               return 0;
             }
         }
     }
 
-  /* Binary block of little-endian words follows */
-  count = (to - from  + 1)*sizeof(short);
+  /* The data rows follows */
+  count = to - from  + 1;
 
-  res = receive_device_bin((char*)(data_buffer + from), count,
-    __LINE__, "read_onboard_memory_bin:");
+  while(count &&
+        receive_device_reply_line(reply_buffer, __LINE__,
+          "read_onboard_memory:") &&
+        dev_status == spsrdevOk)
+    {
+      str = reply_buffer;
 
-  return res == count && dev_status == spsrdevOk;
+      do
+        {
+          lnum = strtol(str, &eptr, 10);
 
-} /* read_onboard_memory_bin(int from, int to) */
+          if(eptr && *eptr != 32 && *eptr != 0)
+            {
+              set_error_and_state(spsrdevBadResponse, __LINE__,
+                "read_onboard_memory:");
+              return 0;
+            }
 
+          if(reversed_data_array)
+            *buf-- = lnum;
+          else
+            *buf++ = lnum;
+
+          str = eptr;
+          count--;
+        }
+      while(count && eptr && *eptr == 32);
+
+      if(count)
+        {
+          // XXX for DEBUG
+        }
+
+    } // while(count &&
+
+  return dev_status == spsrdevOk;
+
+} /* read_onboard_memory(int from, int to) */
 
 
 /*
@@ -1860,6 +1349,15 @@ _clear_globals(void)
  * Access to configuration and parameters profile.
  */
 
+/* Schedule recongiguration by clearing config profile */
+static void
+shedule_reconfiguration(void)
+{
+  erase_config_section(ConfigSection);
+
+} /* shedule_reconfiguration(void) */
+
+
 /* Load configuration from profile */
 static void
 _load_config(void)
@@ -1869,14 +1367,19 @@ _load_config(void)
     {
       _clear_globals();
 
-      port_num =     (short)read_config_int(ConfigSection, "ComPort", port_num);
-      step_divisor = read_config_int(ConfigSection, "StepDivisor", step_divisor);
-      PUTINRANGE(step_divisor, 0, 2);
-      min_pos = range_min = read_config_int(ConfigSection, "RangeMin", range_min);
-      max_pos = range_max =   read_config_int(ConfigSection, "RangeMax", range_max);
-      limsw1_ref =          read_config_int(ConfigSection, "LimitSW1Ref", limsw1_ref);
-      limsw2_ref =          read_config_int(ConfigSection, "LimitSW2Ref", limsw2_ref);
-      motor_ref  =          read_config_int(ConfigSection, "MotorRef", motor_ref);
+      port_num =     (short)read_config_int(ConfigSection, "ComPort", 0);
+      range_min =           read_config_int(ConfigSection, "RangeMin", 0);
+      range_max =           read_config_int(ConfigSection, "RangeMax", 0); //range_max);
+      min_pos =             read_config_int(ConfigSection, "MinPos", 0); //min_pos);
+      max_pos =             read_config_int(ConfigSection, "MaxPos", 0); //max_pos);
+      limsw1_ref =          read_config_int(ConfigSection, "LimitSW1Ref", 0);
+      limsw2_ref =          read_config_int(ConfigSection, "LimitSW2Ref", 0);
+
+      if(min_pos < range_min)
+        min_pos = range_min;
+
+      if(max_pos > range_max)
+        max_pos = range_max;
 
       /* XXX. Here we must check the order and limits! */
 
@@ -1888,15 +1391,15 @@ _load_config(void)
 static void
 _store_config(void)
 {
-  erase_config_section(ConfigSection);  // Clear profile
+  shedule_reconfiguration();  // Clear profile
 
   write_config_int(ConfigSection, "ComPort", port_num, 0);
-  write_config_int(ConfigSection, "StepDivisor", step_divisor, 0);
+  write_config_int(ConfigSection, "MinPos", min_pos, 0);
+  write_config_int(ConfigSection, "MaxPos", max_pos, 0);
   write_config_int(ConfigSection, "RangeMin", range_min, 0);
   write_config_int(ConfigSection, "RangeMax", range_max, 0);
   write_config_int(ConfigSection, "LimitSW1Ref", limsw1_ref, 0);
   write_config_int(ConfigSection, "LimitSW2Ref", limsw2_ref, 0);
-  write_config_int(ConfigSection, "MotorRef", motor_ref, 0);
 
 } /* _store_config(void) */
 
@@ -1904,27 +1407,13 @@ _store_config(void)
 static void
 load_params(void)
 {
-  high_gain      =   read_params_int("HighGain", high_gain);
-  high_prr       =   read_params_int("HighPRR", high_prr);
-  low_prr_mode   =   read_params_int("LowPRRMode", low_prr_mode);
-  high_prr_mode  =   read_params_int("HighPRRMode", high_prr_mode);
-  ext_sync_mode  =   read_params_int("ExtSyncMode", ext_sync_mode);
-  adc_sync_delay =   read_params_double("ADCSyncDelay", adc_sync_delay);
-
-  stepping_rate =       read_params_double("SteppingRate", stepping_rate);
-  acceleration  =       read_params_int("Acceleration", acceleration);
+  stepping_rate =       read_params_int("SteppingRate", stepping_rate);
   reversed_data_array = read_params_int("ReversedArray", reversed_data_array);
   bidir_scanning =      read_params_int("BiDirScanning", bidir_scanning);
   current_pos =         read_params_int("CurrentPos", current_pos);
-
-  min_pos=              read_params_int("MinPos", range_min);
-  max_pos=              read_params_int("MaxPos", range_max);
-
-  if(min_pos < range_min)
-    min_pos = range_min;
-
-  if(max_pos > range_max)
-    max_pos = range_max;
+  
+  min_pos=              read_params_int("MinPos", min_pos);
+  max_pos=              read_params_int("MaxPos", max_pos);
 
 } /* load_params(void) */
 
@@ -1933,15 +1422,7 @@ store_params(void)
 {
   erase_params_section();
 
-  write_params_int("HighGain", high_gain, 0);
-  write_params_int("HighPRR", high_prr, 0);
-  write_params_int("LowPRRMode", low_prr_mode, 0);
-  write_params_int("HighPRRMode", high_prr_mode, 0);
-  write_params_int("ExtSyncMode", ext_sync_mode, 0);
-  write_params_double("ADCSyncDelay", adc_sync_delay);
-
-  write_params_double("SteppingRate", stepping_rate);
-  write_params_int("Acceleration", acceleration, 0);
+  write_params_int("SteppingRate", stepping_rate, 0);
   write_params_int("ReversedArray", reversed_data_array, 0);
   write_params_int("BiDirScanning", bidir_scanning, 0);
   write_params_int("CurrentPos", current_pos, 0);
@@ -1950,19 +1431,6 @@ store_params(void)
   write_params_int("MaxPos", max_pos, 0);
 
 } /* store_params(void) */
-
-/* Schedule recongiguration by clearing config profile */
-static void
-shedule_reconfiguration(void)
-{
-  port_num = 0;
-  store_params();
-
-  reconfiguration_requested = 1;
-
-} /* shedule_reconfiguration(void) */
-
-
 
 
 /*--------------------------------------------------------------------------*
@@ -2015,7 +1483,7 @@ is_valid_configuration(void)
 
 
 /*---------------------------------------------------------------------------
- *  This function uses wizard-like UC2configDlg to setup internal
+ *  This function uses wizard-like UC1configDlg to setup internal
  *  configuration data and write out this configuration to driver's profile.
  *
  *  If no sutable hardware was found or user has canceled configuration
@@ -2027,10 +1495,8 @@ _setup_configuration(void)
   if(port_num > 0)
     return true; // Already configured
 
-  /* Invoke UC2configDlg and wait for user to select */
-  bool res = UC2Configure();
-
-  if(!res)
+  /* Invoke UC1configDlg and wait for user to select */
+  if(!UC1Configure())
     {
       /* Configuration canceled. */
       MessageDlg(
@@ -2040,16 +1506,15 @@ _setup_configuration(void)
         "Restart software to try again.",
         mtError, TMsgDlgButtons() << mbOK, 0);
 
-      port_num = 0; // Forece reconfig at next start
+      return false;
     }
 
   /* Write out config to profile */
   _store_config();
-  store_params();
 
   close_device();
 
-  return res;
+  return true;
 
 } /* _setup_configuration(void) */
 
@@ -2060,11 +1525,24 @@ _setup_configuration(void)
 static bool
 is_configured(void)
 {
-  _load_config();
-  load_params();
+  static bool cfg_loaded = false;
+  static bool cfg_done = false;
+
+  if(!cfg_loaded)
+    {
+      cfg_loaded = true;
+      _load_config();
+    }
 
   if(port_num <= 0)
-    return _setup_configuration();
+    {
+      if(cfg_done)
+        return false;
+
+      cfg_done = true;
+
+      return _setup_configuration();
+    }
 
   return true;
 
@@ -2089,9 +1567,9 @@ init_device_info(SPSRDevInfo* info)
   if(!is_configured())
     return;
 
-  /* XXX. May be this has to be done in some other place? */  
+  /* XXX. May be this is to be done in some other place? */  
   channel_elements[0] = CHANNEL_ELEMENTS;
-  channel_bits[0] = 14; //12;
+  channel_bits[0] = 12;
 
   /* Initialize device dependent fields */
   info->dev_name = DevName;
@@ -2116,6 +1594,9 @@ init_device_info(SPSRDevInfo* info)
 void
 init_device(void)
 {
+  /* XXX ToDo. Clear buffers */
+  //setmem();
+
   /*
    *  This function called only after internal configuration information
    *  was successfuly setup. But there is no guaranty that physical hardware
@@ -2142,7 +1623,7 @@ init_device(void)
       // The device was not parked. We need recalibration.
       start_range_calibration(0);
 
-      /* Invoke UC2CancelDlg and wait */
+      /* Invoke UC1CancelDlg and wait */
       bool done = WaitForFinish(
         "Running device range calibration. Please wait...");
 
@@ -2157,6 +1638,13 @@ init_device(void)
     }
 
   dev_status = spsrdevOk;
+
+  // Final result will be set in the next call.
+  // It is safe to call it here since worker thread is sleeping now.
+  // XXX. Should we do it here??? May be we should use:
+  //   if(acquire_params_lock()) release_params_lock(1);
+  // and let the worker thread to do the rest?
+  // device_update_params();
 
   if(acquire_params_lock()) release_params_lock(1);
 
@@ -2188,14 +1676,11 @@ done_device(void)
   dev_status = spsrdevNoInit;
 
   /* Store settings */
-  if(!reconfiguration_requested)
-    store_params();
-
-  _store_config();
+  store_params();
 
   /* Close connection */
   close_device();
-  //close_error_log_file(); // This already done in close_device() 
+  //close_error_log_file(); //XXX this already done in close_device() 
 
 } /* done_device(void) */
 
@@ -2218,7 +1703,7 @@ reset_device(void)
     {
       start_range_calibration(0);
 
-      /* Invoke UC2CancelDlg and wait */
+      /* Invoke UC1CancelDlg and wait */
       bool done = WaitForFinish(
         "Running device range calibration. Please wait...");
 
@@ -2263,7 +1748,7 @@ device_setup_dialog(HWND hParent)
   if(!CONNECTED)
     return;
 
-  UC2Setup();
+  UC1Setup();
 
 } /* device_setup_dialog(HWND hParent) */
 
@@ -2283,28 +1768,9 @@ device_update_params(void)
   if(!CONNECTED)
     return;
 
-  /* Stepping motor params */
+  set_stepping_rate(stepping_rate);
   set_limsw_ref(1, limsw1_ref);
   set_limsw_ref(2, limsw2_ref);
-  set_motor_ref(motor_ref);
-
-  /* The order of these calls is significant! */
-  set_motor_step_divisor(step_divisor);
-  set_motor_acceleration(acceleration);
-  set_stepping_rate(stepping_rate);
-
-  /* Photo registrator params */
-  set_photo_gain(high_gain);
-  set_photo_pulse_rate(high_prr);
-  set_photo_low_prr_mode(low_prr_mode);
-  set_photo_high_prr_mode(high_prr_mode);
-
-  //set_photo_ext_sync_mode(ext_sync_mode);
-
-  // Fast motion w/o DAQ
-  set_photo_ext_sync_mode(0);
-
-  set_photo_adc_sync_delay(adc_sync_delay);
 
 } /* device_update_params(void) */
 
@@ -2366,7 +1832,7 @@ device_syncin_detected(void)
  *    Starts the data acquizition cycle. We must set dev_status to
  *    spsrdevBusy to signal that we have success starting acquisition.
  */
-static int prescan = 0;             // Flag set in initial phase of daq
+static int prescan = 0;  // Flag set in initial phase of daq
 static int end_pos, start_pos;      // Start/End positions for work scan
 
 void
@@ -2377,8 +1843,8 @@ device_start_acquisition(void)
   if(!CONNECTED)
     return;
 
-  // XXX. Force to recheck configuration since controller
-  //      can be swaped or moved to other USB connector.
+  // XXX. Force to recheck configuration since controllers
+  //      can be swaped or moved to other slots.
   //device_update_params();
 
   // Choose start/end positions
@@ -2433,9 +1899,6 @@ device_stop_acquisition(void)
 
   stop_device();
 
-  // Fast motion w/o DAQ
-  set_photo_ext_sync_mode(0);
-
   // Restore ready status
   if(dev_status == spsrdevBusy)
     dev_status = spsrdevOk;
@@ -2482,10 +1945,7 @@ device_check_acquisition(void)
       prescan = 0;
       dev_status = spsrdevOk;
 
-      // Fast motion w/o DAQ
-      set_photo_ext_sync_mode(ext_sync_mode);
-
-      if(clear_onboard_memory(0, max_pos) && start_motion(end_pos))
+      if(clear_onboard_memory(0, 4095) && start_motion(end_pos))
         {
           // If we get to here then all seems to be OK.
           acq_start_time = timeGetTime();
@@ -2495,14 +1955,12 @@ device_check_acquisition(void)
   else
     {
       // Daq finished. Get results.
+      // XXX Does not works. setmem((void*)data_buffer, DBUF_SIZE*sizeof(data_buffer[0]), 0);
       for(int i = 0; i < DBUF_SIZE; i++)
         data_buffer[i] = 0;
 
       if(dev_status == spsrdevOk)
-        read_onboard_memory_bin(min_pos, max_pos);
-
-      // Fast motion w/o DAQ
-      set_photo_ext_sync_mode(0);
+        read_onboard_memory(min_pos, max_pos);
     }
 } /* device_check_acquisition(void) */
 
@@ -2522,12 +1980,8 @@ device_get_channel_data(int channel, double* buf)
   if(channel != 0)
     return 0;
 
-  if(reversed_data_array)
-    for(i = 0; i < channel_elements[0]; i++)
-      buf[i] = data_buffer[channel_elements[0] - i - 1];
-  else
-    for(i = 0; i < channel_elements[0]; i++)
-      buf[i] = data_buffer[i];
+  for(i = 0; i < channel_elements[0]; i++)
+    buf[i] = data_buffer[i /* + min_pos */];
 
   return channel_elements[0];
 
